@@ -38,14 +38,13 @@ import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 @AutoService(PostProcessor.class)
 public final class PolymorphicSignaturesPlugin implements PostProcessor {
-    private Elements elements;
-    private Types types;
-    private Context.CommonSuperClassFinder commonSuperClassFinder;
+    private @Nullable Elements elements;
+    private @Nullable Types types;
+    private Context.@Nullable CommonSuperClassFinder commonSuperClassFinder;
 
     private record AnnotationInfo(
             TypeElement annotation,
@@ -220,7 +219,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
             while ((followingNode = method.instructions.get(idx + 1)) instanceof TypeInsnNode || followingNode instanceof MethodInsnNode) {
                 if (followingNode instanceof TypeInsnNode typeInsnNode) {
                     if (typeInsnNode.getOpcode() == Opcodes.CHECKCAST) {
-                        descriptor = descriptor.changeReturnType(ClassDesc.of(typeInsnNode.desc.replace('/', '.')));
+                        descriptor = descriptor.changeReturnType(typeInsnNode.desc.startsWith("[") ? ClassDesc.ofDescriptor(typeInsnNode.desc) : ClassDesc.of(typeInsnNode.desc.replace('/', '.')));
                         method.instructions.remove(typeInsnNode);
                     } else {
                         break;

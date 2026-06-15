@@ -8,6 +8,11 @@ java {
     withSourcesJar()
     withJavadocJar()
     toolchain.languageVersion = JavaLanguageVersion.of(25)
+    registerFeature("utilities") {
+        usingSourceSet(sourceSets.create("utilities"))
+        withSourcesJar()
+        withJavadocJar()
+    }
 }
 
 dependencies {
@@ -17,9 +22,20 @@ dependencies {
     implementation("org.ow2.asm:asm-analysis:9.10.1")
 
     testAnnotationProcessor(project(':'))
+
+    utilitiesCompileOnly(project(':'))
+    utilitiesCompileOnly(cLibs.bundles.compileonly)
+    utilitiesAnnotationProcessor(project(':'))
+    utilitiesAnnotationProcessor(cLibs.bundles.annotationprocessor)
 }
 
 tasks.named('compileTestJava', JavaCompile) {
+    javacPostProcessor {
+        plugins.add('dev.lukebemish.polymorphic-signatures')
+    }
+}
+
+tasks.named('compileUtilitiesJava', JavaCompile) {
     javacPostProcessor {
         plugins.add('dev.lukebemish.polymorphic-signatures')
     }
