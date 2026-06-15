@@ -9,6 +9,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
@@ -35,6 +36,7 @@ import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -44,7 +46,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
     private Elements elements;
     private Types types;
     private Context.CommonSuperClassFinder commonSuperClassFinder;
-    
+
     private record AnnotationInfo(
             TypeElement annotation,
             ExecutableElement value,
@@ -103,14 +105,15 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                     insnList.add(new TypeInsnNode(Opcodes.NEW, Type.getInternalName(AssertionError.class)));
                                     insnList.add(new InsnNode(Opcodes.DUP));
                                     insnList.add(new LdcInsnNode("This method should not be called directly; consuming code should be built with the polymorphic-signatures compiler plugin so that the relevant metafactory is used"));
-                                    insnList.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, Type.getInternalName(AssertionError.class), "<init>", "(Ljava/lang/String;)V", false));
+                                    insnList.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, Type.getInternalName(AssertionError.class), "<init>", "(Ljava/lang/Object;)V", false));
                                     insnList.add(new InsnNode(Opcodes.ATHROW));
                                     node.instructions = insnList;
                                 }
                             }
                         }
                         // Do processing on node here
-                        for (var insn : node.instructions) {
+                        for (int idx = 0; idx < node.instructions.size(); idx++) {
+                            var insn = node.instructions.get(idx);
                             if (insn instanceof MethodInsnNode methodInsn) {
                                 var ownerBinaryName = methodInsn.owner;
                                 var element = findElement(ownerBinaryName.replace('/', '.'), elements);
@@ -132,16 +135,16 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                     mirror = aMirror;
                                                 }
                                             }
-                                            
+
                                             var descriptor = MethodTypeDesc.ofDescriptor(methodInsn.desc);
-                                            
+
                                             // if non-static, prepend the receiver type
                                             if (methodInsn.getOpcode() != Opcodes.INVOKESTATIC) {
                                                 descriptor = descriptor.insertParameterTypes(0, ClassDesc.ofInternalName(methodInsn.owner));
                                             }
 
                                             descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor);
-                                            
+
                                             var implName = (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue();
                                             var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
                                             var implClazzType = implClazz == null ? annotationInfo.self.asType() : (TypeMirror) implClazz.getValue();
@@ -150,6 +153,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             }
                                             var implReceiver = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.owner : elements.getBinaryName((TypeElement) declaredImplClazzType.asElement()).toString().replace('.', '/');
                                             var isInterface = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.itf : declaredImplClazzType.asElement().getKind() == ElementKind.INTERFACE;
+                                            idx = node.instructions.indexOf(insn);
                                             node.instructions.set(insn, new InvokeDynamicInsnNode(
                                                     methodInsn.name,
                                                     descriptor.descriptorString(),
@@ -173,6 +177,28 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         };
     }
 
+    private final Map<String, Type> UNBOXING_TYPES = Map.of(
+        Type.getType(Boolean.class).getInternalName(), Type.getType(boolean.class),
+        Type.getType(Byte.class).getInternalName(), Type.getType(byte.class),
+        Type.getType(Character.class).getInternalName(), Type.getType(char.class),
+        Type.getType(Short.class).getInternalName(), Type.getType(short.class),
+        Type.getType(Integer.class).getInternalName(), Type.getType(int.class),
+        Type.getType(Long.class).getInternalName(), Type.getType(long.class),
+        Type.getType(Float.class).getInternalName(), Type.getType(float.class),
+        Type.getType(Double.class).getInternalName(), Type.getType(double.class)
+    );
+
+    private final Map<String, String> UNBOXING_NAMES = Map.of(
+        Type.getType(Boolean.class).getInternalName(), "booleanValue",
+        Type.getType(Byte.class).getInternalName(), "byteValue",
+        Type.getType(Character.class).getInternalName(), "charValue",
+        Type.getType(Short.class).getInternalName(), "shortValue",
+        Type.getType(Integer.class).getInternalName(), "intValue",
+        Type.getType(Long.class).getInternalName(), "longValue",
+        Type.getType(Float.class).getInternalName(), "floatValue",
+        Type.getType(Double.class).getInternalName(), "doubleValue"
+    );
+
     private MethodTypeDesc findActualDescriptor(String owner, MethodNode method, MethodInsnNode methodInsn, MethodTypeDesc originalDescriptor) {
         var analyzer = new Analyzer<>(new PolymorphicInterpreter(Opcodes.ASM9, Objects.requireNonNull(commonSuperClassFinder)));
         try {
@@ -182,9 +208,33 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
             for (int i = 0; i < descriptor.parameterCount(); i++) {
                 var stackIndex = stackAtInsn.getStackSize() - descriptor.parameterCount() + i;
                 var typeAtIndex = stackAtInsn.getStack(stackIndex);
-                descriptor = descriptor.changeParameterType(i, ClassDesc.ofDescriptor(typeAtIndex.getType().getDescriptor()));
-                if (typeAtIndex.getBoxing() != null) {
-                    method.instructions.remove(typeAtIndex.getBoxing());
+                if (typeAtIndex.getType() != null) {
+                    descriptor = descriptor.changeParameterType(i, ClassDesc.ofDescriptor(typeAtIndex.getType().getDescriptor()));
+                    if (typeAtIndex.getBoxing() != null) {
+                        method.instructions.remove(typeAtIndex.getBoxing());
+                    }
+                }
+            }
+            var idx = method.instructions.indexOf(methodInsn);
+            AbstractInsnNode followingNode;
+            while ((followingNode = method.instructions.get(idx + 1)) instanceof TypeInsnNode || followingNode instanceof MethodInsnNode) {
+                if (followingNode instanceof TypeInsnNode typeInsnNode) {
+                    if (typeInsnNode.getOpcode() == Opcodes.CHECKCAST) {
+                        descriptor = descriptor.changeReturnType(ClassDesc.of(typeInsnNode.desc.replace('/', '.')));
+                        method.instructions.remove(typeInsnNode);
+                    } else {
+                        break;
+                    }
+                } else {
+                    MethodInsnNode methodInsnNode = (MethodInsnNode) followingNode;
+                    if (UNBOXING_NAMES.containsKey(methodInsnNode.owner) && methodInsnNode.name.equals(UNBOXING_NAMES.get(methodInsnNode.owner)) && methodInsnNode.desc.equals("()"+UNBOXING_TYPES.get(methodInsnNode.owner).getDescriptor())) {
+                        descriptor = descriptor.changeReturnType(ClassDesc.ofDescriptor(
+                            UNBOXING_TYPES.get(methodInsnNode.owner).getDescriptor()
+                        ));
+                        method.instructions.remove(methodInsnNode);
+                    } else {
+                        break;
+                    }
                 }
             }
             return descriptor;

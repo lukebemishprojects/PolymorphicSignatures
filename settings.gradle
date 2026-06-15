@@ -46,7 +46,6 @@ gradle.lifecycle.beforeProject {
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
-        mavenLocal()
     }
     repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
     rulesMode = RulesMode.FAIL_ON_PROJECT_RULES

@@ -54,10 +54,8 @@ import java.util.Map;
 import java.util.Objects;
 
 class PolymorphicInterpreter extends Interpreter<PolymorphicValue> implements Opcodes {
-    public static final Type NULL_TYPE = Type.getObjectType("null");
-    
     private final PostProcessor.Context.CommonSuperClassFinder commonSuperClassFinder;
-    
+
     PolymorphicInterpreter(int api, PostProcessor.Context.CommonSuperClassFinder commonSuperClassFinder) {
         super(api);
         this.commonSuperClassFinder = commonSuperClassFinder;
@@ -87,7 +85,7 @@ class PolymorphicInterpreter extends Interpreter<PolymorphicValue> implements Op
     public @Nullable PolymorphicValue newOperation(final AbstractInsnNode insn) throws AnalyzerException {
         switch (insn.getOpcode()) {
             case ACONST_NULL:
-                return newValue(NULL_TYPE);
+                return newValue(Type.getType(Object.class));
             case ICONST_M1:
             case ICONST_0:
             case ICONST_1:
@@ -316,7 +314,7 @@ class PolymorphicInterpreter extends Interpreter<PolymorphicValue> implements Op
             throws AnalyzerException {
         return null;
     }
-    
+
     private final Map<String, Type> BOXING = Map.of(
             Type.getType(Boolean.class).getInternalName(), Type.getType(boolean.class),
             Type.getType(Byte.class).getInternalName(), Type.getType(byte.class),
