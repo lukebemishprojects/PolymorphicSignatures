@@ -342,7 +342,7 @@ class PolymorphicInterpreter extends Interpreter<PolymorphicValue> implements Op
                     new Type[] {BOXING.get(methodInsn.owner)}
             )) {
                 return new PolymorphicValue(
-                        Objects.requireNonNull(values.getFirst()).getType(),
+                    BOXING.get(methodInsn.owner),
                         insn
                 );
             }

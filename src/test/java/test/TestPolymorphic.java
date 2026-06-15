@@ -15,7 +15,7 @@ public class TestPolymorphic {
     }
 
     @PolymorphicSignature("argClassMetafactory")
-    public static <T> Class<? super T> argClass(T value) {
+    public final <T> Class<? super T> argClass(T value) {
         throw new AssertionError();
     }
 
@@ -29,8 +29,8 @@ public class TestPolymorphic {
     public static CallSite argClassMetafactory(MethodHandles.Lookup lookup, String name, MethodType type) {
         return new ConstantCallSite(MethodHandles.dropArguments(MethodHandles.constant(
                 Class.class,
-                type.parameterType(0)
-        ), 0, type.parameterType(0)));
+                type.parameterType(1)
+        ), 0, type.parameterType(0), type.parameterType(1)));
     }
 
     static void main() {
@@ -42,9 +42,10 @@ public class TestPolymorphic {
         System.out.println("Object: "+zero3);
         String zero4 = defaultValue();
         System.out.println("String: "+zero4);
-        System.out.println("int class: "+argClass(1));
-        System.out.println("long class: "+argClass(1L));
-        System.out.println("String class: "+argClass("test"));
-        System.out.println("Runnable class: "+argClass((Runnable) () -> {}));
+        var receiver = new TestPolymorphic();
+        System.out.println("short class: "+receiver.argClass((short) 1));
+        System.out.println("long class: "+receiver.argClass(1L));
+        System.out.println("String class: "+receiver.argClass("test"));
+        System.out.println("Runnable class: "+receiver.argClass((Runnable) () -> {}));
     }
 }
