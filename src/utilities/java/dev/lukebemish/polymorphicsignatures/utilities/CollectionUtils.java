@@ -9,7 +9,7 @@ import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 
-public final class ArrayUtils {
+public final class CollectionUtils {
     /// {@return an array of the compile-inferred type of the provided size}
     /// This method is signature-polymorphic by its return type; the return type is determined at compile time and used
     /// to produce the proper type array constructor:
@@ -30,11 +30,7 @@ public final class ArrayUtils {
         throw new AssertionError();
     }
 
-    private ArrayUtils() {}
-
-    static void main() {
-        String test = array(3);
-    }
+    private CollectionUtils() {}
 
     @ApiStatus.Internal
     public static CallSite $array(MethodHandles.Lookup lookup, String name, MethodType type) {

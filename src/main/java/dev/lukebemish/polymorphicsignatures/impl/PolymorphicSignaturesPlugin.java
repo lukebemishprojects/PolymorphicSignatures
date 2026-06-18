@@ -220,6 +220,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                     }
                 }
             }
+
             if (varargs) {
                 // Before varargs call:
                 // NEWARRAY / ANEWARRAY
@@ -229,7 +230,6 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 //   <stuff>
                 //   XASTORE
                 // ] x N
-                frames = analyzer.analyze(owner, method);
                 // Look at current stack, it's got just an array on the end
                 // - Step backwards over XASTORE
                 // - Record type
@@ -264,6 +264,9 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                         var topOfStack = currentStack.getStack(currentStack.getStackSize() - 1);
                         if (topOfStack.getType() != null) {
                             varargsTypes.addFirst(topOfStack.getType());
+                            if (topOfStack.getBoxing() != null) {
+                                toRemove.add(topOfStack.getBoxing());
+                            }
                         } else {
                             errored = true;
                             return null;
@@ -317,6 +320,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 }
                 descriptor = descriptor.insertParameterTypes(descriptor.parameterCount(), parameters);
             }
+
             var idx = method.instructions.indexOf(methodInsn);
             AbstractInsnNode followingNode;
             while ((followingNode = method.instructions.get(idx + 1)) instanceof TypeInsnNode || followingNode instanceof MethodInsnNode) {

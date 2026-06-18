@@ -22,6 +22,11 @@ dependencies {
     implementation("org.ow2.asm:asm-analysis:9.10.1")
 
     testAnnotationProcessor(project(':'))
+    testImplementation(project(':')) {
+        capabilities {
+            requireFeature("utilities")
+        }
+    }
 
     utilitiesCompileOnly(project(':'))
     utilitiesCompileOnly(cLibs.bundles.compileonly)
