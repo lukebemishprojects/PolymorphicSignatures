@@ -24,13 +24,17 @@ public final class ArrayUtils {
     /// ```
     /// @param size the size of the array to create
     /// @param <A> the type of the array to create; will be inferred at compile time.
-    /// @throws BootstrapMethodError if the inferred type is not an array type or assignable from `Object[]`
+    /// @throws IllegalArgumentException if the inferred type is not an array type or assignable from `Object[]`
     @PolymorphicSignature("$array")
     public static <A extends Cloneable & Serializable> A array(int size) {
         throw new AssertionError();
     }
 
     private ArrayUtils() {}
+
+    static void main() {
+        String test = array(3);
+    }
 
     @ApiStatus.Internal
     public static CallSite $array(MethodHandles.Lookup lookup, String name, MethodType type) {
@@ -39,6 +43,12 @@ public final class ArrayUtils {
         } else if (type.returnType().isAssignableFrom(Object[].class)) {
             return new ConstantCallSite(MethodHandles.arrayConstructor(Object[].class).asType(type));
         }
-        throw new IllegalArgumentException(String.format("Type '%s' is not an array type", type.returnType()));
+        return new ConstantCallSite(
+            MethodHandles.dropArguments(
+                MethodHandles.throwException(type.returnType(), IllegalArgumentException.class)
+                    .bindTo(new IllegalArgumentException(String.format("Type '%s' is not an array type", type.returnType()))),
+                0, int.class
+            )
+        );
     }
 }

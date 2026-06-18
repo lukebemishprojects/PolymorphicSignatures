@@ -18,7 +18,7 @@ java {
 dependencies {
     compileOnly(cLibs.bundles.compileonly)
     annotationProcessor(cLibs.bundles.annotationprocessor)
-    implementation("dev.lukebemish:javac-post-processor:0.1.7")
+    implementation("dev.lukebemish:javac-post-processor:0.1.8")
     implementation("org.ow2.asm:asm-analysis:9.10.1")
 
     testAnnotationProcessor(project(':'))
@@ -30,13 +30,23 @@ dependencies {
 }
 
 tasks.named('compileTestJava', JavaCompile) {
-    javacPostProcessor {
-        plugins.add('dev.lukebemish.polymorphic-signatures')
-    }
+    javacPostProcessor.plugins.add('dev.lukebemish.polymorphic-signatures')
+}
+
+tasks.register('compileTestJavaDebug', JavaCompile) {
+    source tasks.compileTestJava.source
+    classpath = tasks.compileTestJava.classpath
+    options.annotationProcessorPath = tasks.compileTestJava.options.annotationProcessorPath
+    javaCompiler = tasks.compileTestJava.javaCompiler
+    destinationDirectory = layout.buildDirectory.dir("compileTestJavaDebug")
+    options.forkOptions.jvmArgs.add(
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=localhost:5005"
+    )
+    options.fork = true
+}.configure {
+    javacPostProcessor.plugins.add('dev.lukebemish.polymorphic-signatures')
 }
 
 tasks.named('compileUtilitiesJava', JavaCompile) {
-    javacPostProcessor {
-        plugins.add('dev.lukebemish.polymorphic-signatures')
-    }
+    javacPostProcessor.plugins.add('dev.lukebemish.polymorphic-signatures')
 }

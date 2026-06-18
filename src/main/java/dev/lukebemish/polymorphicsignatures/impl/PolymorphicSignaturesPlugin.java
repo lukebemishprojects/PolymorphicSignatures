@@ -21,7 +21,6 @@ import org.objectweb.asm.tree.analysis.Analyzer;
 import org.objectweb.asm.tree.analysis.AnalyzerException;
 
 import javax.lang.model.element.AnnotationMirror;
-import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
@@ -35,7 +34,7 @@ import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
@@ -45,6 +44,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
     private @Nullable Elements elements;
     private @Nullable Types types;
     private Context.@Nullable CommonSuperClassFinder commonSuperClassFinder;
+    private Context.@Nullable BinaryBridge binaryBridge;
 
     private record AnnotationInfo(
             TypeElement annotation,
@@ -70,6 +70,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         elements = context.task().getElements();
         types = context.task().getTypes();
         commonSuperClassFinder = context.commonSuperClassFinder();
+        binaryBridge = context.binaryBridge();
     }
 
     @Override
@@ -81,6 +82,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
     public ClassVisitor visit(ClassVisitor next, String binaryName, JavaFileManager fileManager, JavaFileManager.Location location) {
         var elements = Objects.requireNonNull(this.elements);
         var types =  Objects.requireNonNull(this.types);
+        var binaryBridge = Objects.requireNonNull(this.binaryBridge);
         var descriptors = new DescriptorTypeVisitor(elements, types);
         var annotationInfo = new AnnotationInfo(elements);
         return new ClassVisitor(Opcodes.ASM9, next) {
@@ -95,15 +97,14 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                         if (node.visibleAnnotations != null) {
                             for (var annotation : node.visibleAnnotations) {
                                 if (annotation.desc.equals(PolymorphicSignature.class.descriptorString())) {
-                                    var receiverElement = findElement(binaryName, elements);
-                                    if (receiverElement == null) {
-                                        throw new IllegalArgumentException("Found @PolymorphicSignature method in local or anonymous class: " + binaryName);
-                                    }
                                     // Replace method body with erroring one that reports lack of compilation with this post-processor
                                     var insnList = new InsnList();
                                     insnList.add(new TypeInsnNode(Opcodes.NEW, Type.getInternalName(AssertionError.class)));
                                     insnList.add(new InsnNode(Opcodes.DUP));
-                                    insnList.add(new LdcInsnNode("This method should not be called directly; consuming code should be built with the polymorphic-signatures compiler plugin so that the relevant metafactory is used"));
+                                    insnList.add(new LdcInsnNode(
+                                        "This method should not be called directly; consuming code should be built with the polymorphic-signatures compiler plugin so that the relevant metafactory is used." +
+                                            ((node.access & Opcodes.ACC_VARARGS) == 0 ? "" : " This method may not be invoked directly with an array as its varargs argument.")
+                                    ));
                                     insnList.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, Type.getInternalName(AssertionError.class), "<init>", "(Ljava/lang/Object;)V", false));
                                     insnList.add(new InsnNode(Opcodes.ATHROW));
                                     node.instructions = insnList;
@@ -115,7 +116,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                             var insn = node.instructions.get(idx);
                             if (insn instanceof MethodInsnNode methodInsn) {
                                 var ownerBinaryName = methodInsn.owner;
-                                var element = findElement(ownerBinaryName.replace('/', '.'), elements);
+                                var element = binaryBridge.elementByInternalName(ownerBinaryName);
                                 if (element != null) {
                                     // Ignore cases of local/anonymous classes
                                     ExecutableElement methodElement = null;
@@ -142,7 +143,10 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                 descriptor = descriptor.insertParameterTypes(0, ClassDesc.ofInternalName(methodInsn.owner));
                                             }
 
-                                            descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor);
+                                            descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor, methodElement.isVarArgs());
+                                            if (descriptor == null) {
+                                                continue;
+                                            }
 
                                             var implName = (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue();
                                             var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
@@ -198,10 +202,12 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         Type.getType(Double.class).getInternalName(), "doubleValue"
     );
 
-    private MethodTypeDesc findActualDescriptor(String owner, MethodNode method, MethodInsnNode methodInsn, MethodTypeDesc originalDescriptor) {
+    private @Nullable MethodTypeDesc findActualDescriptor(String owner, MethodNode method, MethodInsnNode methodInsn, MethodTypeDesc originalDescriptor, boolean varargs) {
         var analyzer = new Analyzer<>(new PolymorphicInterpreter(Opcodes.ASM9, Objects.requireNonNull(commonSuperClassFinder)));
+        var toRemove = new ArrayDeque<AbstractInsnNode>();
+        var errored = false;
         try {
-            var frames = analyzer.analyzeAndComputeMaxs(owner, method);
+            var frames = analyzer.analyze(owner, method);
             var stackAtInsn = frames[method.instructions.indexOf(methodInsn)];
             var descriptor = originalDescriptor;
             for (int i = 0; i < descriptor.parameterCount(); i++) {
@@ -210,9 +216,106 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 if (typeAtIndex.getType() != null) {
                     descriptor = descriptor.changeParameterType(i, ClassDesc.ofDescriptor(typeAtIndex.getType().getDescriptor()));
                     if (typeAtIndex.getBoxing() != null) {
-                        method.instructions.remove(typeAtIndex.getBoxing());
+                        toRemove.add(typeAtIndex.getBoxing());
                     }
                 }
+            }
+            if (varargs) {
+                // Before varargs call:
+                // NEWARRAY / ANEWARRAY
+                // [
+                //   DUP
+                //   ICONST/SIPUSH/BIPUSH/LDC
+                //   <stuff>
+                //   XASTORE
+                // ] x N
+                frames = analyzer.analyze(owner, method);
+                // Look at current stack, it's got just an array on the end
+                // - Step backwards over XASTORE
+                // - Record type
+                // - Step backwards until index and dup and proper stack depth
+                // - record index and dup instructions
+                // - check for newarray
+                var currentIndex = method.instructions.indexOf(methodInsn);
+                var varargsTypes = new ArrayDeque<Type>();
+                while (true) {
+                    currentIndex -= 1;
+                    if (currentIndex < 0) {
+                        errored = true;
+                        return null;
+                        // TODO: log/warn?
+                        // throw new IllegalStateException("Ran out stack trying to resolve varargs");
+                    }
+                    var instrBefore = method.instructions.get(currentIndex);
+                    if (instrBefore.getOpcode() == Opcodes.NEWARRAY || instrBefore.getOpcode() == Opcodes.ANEWARRAY) {
+                        toRemove.addFirst(instrBefore);
+                        break;
+                    }
+                    if (instrBefore.getOpcode() >= Opcodes.IASTORE && instrBefore.getOpcode() <= Opcodes.SASTORE) {
+                        toRemove.addFirst(instrBefore);
+                        currentIndex -= 1;
+                        if (currentIndex < 0) {
+                            errored = true;
+                            return null;
+                            // TODO: log/warn?
+                            // throw new IllegalStateException("Ran out stack trying to resolve varargs");
+                        }
+                        var currentStack = frames[currentIndex+1];
+                        var topOfStack = currentStack.getStack(currentStack.getStackSize() - 1);
+                        if (topOfStack.getType() != null) {
+                            varargsTypes.addFirst(topOfStack.getType());
+                        } else {
+                            errored = true;
+                            return null;
+                            // TODO: log/warn?
+                            // throw new IllegalStateException("Could not determine type of varargs argument");
+                        }
+                        var targetStackSize = currentStack.getStackSize() - 1;
+                        AbstractInsnNode currentInstr = null;
+                        // ICONST_0 through ICONST_5, BIPUSH, SIPUSH, LDC
+                        while (currentStack.getStackSize() > targetStackSize || isNonIntInstr(currentInstr)) {
+                            currentIndex -= 1;
+                            if (currentIndex < 0) {
+                                errored = true;
+                                return null;
+                                // TODO: log/warn?
+                                // throw new IllegalStateException("Ran out stack trying to resolve varargs");
+                            }
+                            currentInstr = method.instructions.get(currentIndex);
+                            currentStack = frames[currentIndex+1];
+                        }
+                        toRemove.addFirst(currentInstr);
+                        currentIndex -= 1;
+                        if (currentIndex < 0) {
+                            errored = true;
+                            return null;
+                            // TODO: log/warn?
+                            // throw new IllegalStateException("Ran out stack trying to resolve varargs");
+                        }
+                        var hopefullyDup = method.instructions.get(currentIndex);
+                        if (hopefullyDup.getOpcode() != Opcodes.DUP) {
+                            errored = true;
+                            return null;
+                            // TODO: log/warn?
+                            // throw new IllegalStateException("Expected DUP instruction in varargs");
+                        }
+                        toRemove.addFirst(hopefullyDup);
+                    }
+                }
+                // And at this point there's an int instruction for the size, of some sort
+                if (isNonIntInstr(method.instructions.get(currentIndex - 1))) {
+                    errored = true;
+                    return null;
+                    // TODO: log/warn?
+                    // throw new IllegalStateException("Expected array size instruction");
+                }
+                toRemove.addFirst(method.instructions.get(currentIndex - 1));
+                descriptor = descriptor.dropParameterTypes(descriptor.parameterCount() - 1, descriptor.parameterCount());
+                ClassDesc[] parameters = new ClassDesc[varargsTypes.size()];
+                for (int i = 0; i < parameters.length; i++) {
+                    parameters[i] = ClassDesc.ofDescriptor(Objects.requireNonNull(varargsTypes.pollFirst()).getDescriptor());
+                }
+                descriptor = descriptor.insertParameterTypes(descriptor.parameterCount(), parameters);
             }
             var idx = method.instructions.indexOf(methodInsn);
             AbstractInsnNode followingNode;
@@ -220,7 +323,8 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 if (followingNode instanceof TypeInsnNode typeInsnNode) {
                     if (typeInsnNode.getOpcode() == Opcodes.CHECKCAST) {
                         descriptor = descriptor.changeReturnType(typeInsnNode.desc.startsWith("[") ? ClassDesc.ofDescriptor(typeInsnNode.desc) : ClassDesc.of(typeInsnNode.desc.replace('/', '.')));
-                        method.instructions.remove(typeInsnNode);
+                        toRemove.add(typeInsnNode);
+                        idx++;
                     } else {
                         break;
                     }
@@ -230,7 +334,8 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                         descriptor = descriptor.changeReturnType(ClassDesc.ofDescriptor(
                             UNBOXING_TYPES.get(methodInsnNode.owner).getDescriptor()
                         ));
-                        method.instructions.remove(methodInsnNode);
+                        toRemove.add(methodInsnNode);
+                        idx++;
                     } else {
                         break;
                     }
@@ -239,29 +344,16 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
             return descriptor;
         } catch (AnalyzerException e) {
             throw new RuntimeException(e);
+        } finally {
+            if (!errored) {
+                for (var instr : toRemove) {
+                    method.instructions.remove(instr);
+                }
+            }
         }
     }
 
-    private static @Nullable TypeElement findElement(String ownerBinaryName, Elements elements) {
-        var element = elements.getTypeElement(ownerBinaryName);
-        if (element == null && ownerBinaryName.contains(".")) {
-            var packageElement = elements.getPackageElement(
-                    ownerBinaryName.substring(0, ownerBinaryName.lastIndexOf('.'))
-            );
-            var elementsFound = packageElement.getEnclosedElements();
-            while (!elementsFound.isEmpty() && element == null) {
-                for (var el : elementsFound) {
-                    if (el instanceof TypeElement typeEl && elements.getBinaryName(typeEl).contentEquals(ownerBinaryName)) {
-                        element = typeEl;
-                    }
-                }
-                var newElementsFound = new ArrayList<Element>();
-                for (var el : elementsFound) {
-                    newElementsFound.addAll(el.getEnclosedElements());
-                }
-                elementsFound = newElementsFound;
-            }
-        }
-        return element;
+    private static boolean isNonIntInstr(AbstractInsnNode currentInstr) {
+        return (currentInstr.getOpcode() < Opcodes.ICONST_0 || currentInstr.getOpcode() > Opcodes.ICONST_5) && (currentInstr.getOpcode() < Opcodes.BIPUSH || currentInstr.getOpcode() > Opcodes.LDC);
     }
 }

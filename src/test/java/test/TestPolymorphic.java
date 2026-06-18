@@ -2,6 +2,7 @@ package test;
 
 import dev.lukebemish.polymorphicsignatures.PolymorphicSignature;
 
+import java.io.PrintStream;
 import java.lang.invoke.CallSite;
 import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandles;
@@ -34,6 +35,21 @@ public class TestPolymorphic {
     }
 
     static void main() {
+        class SomeLocalThing {
+            @PolymorphicSignature("metafactory")
+            static <T> void localPolymorphic(T value) {}
+
+            public static CallSite metafactory(MethodHandles.Lookup lookup, String name, MethodType type) throws Throwable {
+                var handle = MethodHandles.dropArguments(lookup.findVirtual(PrintStream.class, "println", MethodType.methodType(void.class, Object.class))
+                    .bindTo(System.out)
+                    .bindTo(type.parameterType(0)),
+                0, type.parameterType(0));
+                return new ConstantCallSite(handle);
+            }
+        }
+
+        SomeLocalThing.localPolymorphic("test");
+
         int zero1 = defaultValue();
         System.out.println("int: "+zero1);
         float zero2 = defaultValue();
