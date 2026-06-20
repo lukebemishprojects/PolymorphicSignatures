@@ -10,7 +10,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.function.Consumer;
 
-public class TypeUtils {
+public final class TypeUtils {
     /// {@return the default value of the output type}
     /// This is the value that a newly-created array of that type would be populated with; it is {@code null} for
     /// reference types and {@code 0} for primitives, or nothing at all for void.
@@ -54,6 +54,14 @@ public class TypeUtils {
     /// @see #reportParameterType(Object, Consumer)
     @PolymorphicSignature("$reportType")
     public native static <T> T reportReturnType(T value, Consumer<? super Class<? extends T>> consumer);
+
+    // --------------------------------
+    // INTERNAL DETAILS BELOW THIS LINE
+    // --------------------------------
+    //
+    // This class contains public metafactories. These are marked internal, as user code should not reference them.
+    // However, they are still binary API as the polymorphic signature methods above cause references to these to be
+    // included in consumer bytecode!
 
     @ApiStatus.Internal
     public static CallSite $defaultValue(MethodHandles.Lookup lookup, String name, MethodType type) {
@@ -123,4 +131,6 @@ public class TypeUtils {
         ).bindTo(valueType);
         return new ConstantCallSite(MethodHandles.collectArguments(MethodHandles.identity(type.parameterType(0)), 1, consume).asType(type));
     }
+
+    private TypeUtils() {}
 }

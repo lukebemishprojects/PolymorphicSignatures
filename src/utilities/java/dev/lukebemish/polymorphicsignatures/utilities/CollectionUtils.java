@@ -28,7 +28,13 @@ public final class CollectionUtils {
     @PolymorphicSignature("$array")
     public native static <A extends Cloneable & Serializable> A array(int size);
 
-    private CollectionUtils() {}
+    // --------------------------------
+    // INTERNAL DETAILS BELOW THIS LINE
+    // --------------------------------
+    //
+    // This class contains public metafactories. These are marked internal, as user code should not reference them.
+    // However, they are still binary API as the polymorphic signature methods above cause references to these to be
+    // included in consumer bytecode!
 
     @ApiStatus.Internal
     public static CallSite $array(MethodHandles.Lookup lookup, String name, MethodType type) {
@@ -45,4 +51,6 @@ public final class CollectionUtils {
             )
         );
     }
+
+    private CollectionUtils() {}
 }
