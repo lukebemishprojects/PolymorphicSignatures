@@ -1,7 +1,10 @@
 package dev.lukebemish.polymorphicsignatures.impl;
 
 import com.google.auto.service.AutoService;
+import dev.lukebemish.bytecodebuilder.BackendASM;
+import dev.lukebemish.bytecodebuilder.Constants;
 import dev.lukebemish.javacpostprocessor.PostProcessor;
+import dev.lukebemish.polymorphicsignatures.Bootstrap;
 import dev.lukebemish.polymorphicsignatures.PolymorphicSignature;
 import org.jspecify.annotations.Nullable;
 import org.objectweb.asm.ClassVisitor;
@@ -30,13 +33,21 @@ import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import javax.tools.JavaFileManager;
 import java.lang.constant.ClassDesc;
+import java.lang.constant.ConstantDesc;
+import java.lang.constant.DirectMethodHandleDesc;
+import java.lang.constant.MethodHandleDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Method;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 @AutoService(PostProcessor.class)
@@ -87,9 +98,9 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         var annotationInfo = new AnnotationInfo(elements);
         return new ClassVisitor(Opcodes.ASM9, next) {
             @Override
-            public MethodVisitor visitMethod(int access, String ownerName, String descriptor, String signature, String[] exceptions) {
-                var node = new MethodNode(access, ownerName, descriptor, signature, exceptions);
-                var superVisitor = super.visitMethod(access, ownerName, descriptor, signature, exceptions);
+            public MethodVisitor visitMethod(int access, String ownerName, String ownerDescriptor, String signature, String[] exceptions) {
+                var node = new MethodNode(access, ownerName, ownerDescriptor, signature, exceptions);
+                Supplier<MethodVisitor> superVisitor = () -> super.visitMethod(node.access, ownerName, ownerDescriptor, signature, exceptions);
                 return new MethodVisitor(Opcodes.ASM9, node) {
                     @Override
                     public void visitEnd() {
@@ -108,6 +119,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                     insnList.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, Type.getInternalName(AssertionError.class), "<init>", "(Ljava/lang/Object;)V", false));
                                     insnList.add(new InsnNode(Opcodes.ATHROW));
                                     node.instructions = insnList;
+                                    node.access &= ~(Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT);
                                 }
                             }
                         }
@@ -115,69 +127,152 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                         for (int idx = 0; idx < node.instructions.size(); idx++) {
                             var insn = node.instructions.get(idx);
                             if (insn instanceof MethodInsnNode methodInsn) {
-                                var ownerBinaryName = methodInsn.owner;
-                                var element = binaryBridge.elementByInternalName(ownerBinaryName);
-                                if (element != null) {
-                                    // Ignore cases of local/anonymous classes
-                                    ExecutableElement methodElement = null;
-                                    for (var el : element.getEnclosedElements()) {
-                                        if (el instanceof ExecutableElement executableElement) {
-                                            if (executableElement.getSimpleName().contentEquals(methodInsn.name) && descriptors.descriptor(executableElement.asType()).equals(methodInsn.desc)) {
-                                                methodElement = executableElement;
+                                ExecutableElement methodElement = findMethodMatching(methodInsn, binaryBridge, descriptors);
+                                if (methodElement != null) {
+                                    if (methodElement.getAnnotation(PolymorphicSignature.class) != null) {
+                                        AnnotationMirror mirror = null;
+                                        for (var aMirror : methodElement.getAnnotationMirrors()) {
+                                            if (types.isSameType(aMirror.getAnnotationType(), annotationInfo.annotation().asType())) {
+                                                mirror = aMirror;
                                             }
                                         }
-                                    }
-                                    if (methodElement != null) {
-                                        if (methodElement.getAnnotation(PolymorphicSignature.class) != null) {
-                                            AnnotationMirror mirror = null;
-                                            for (var aMirror : methodElement.getAnnotationMirrors()) {
-                                                if (types.isSameType(aMirror.getAnnotationType(), annotationInfo.annotation().asType())) {
-                                                    mirror = aMirror;
+
+                                        var descriptor = MethodTypeDesc.ofDescriptor(methodInsn.desc);
+
+                                        // if non-static, prepend the receiver type
+                                        if (methodInsn.getOpcode() != Opcodes.INVOKESTATIC) {
+                                            descriptor = descriptor.insertParameterTypes(0, ClassDesc.ofInternalName(methodInsn.owner));
+                                        }
+
+                                        descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor, methodElement.isVarArgs());
+                                        if (descriptor == null) {
+                                            continue;
+                                        }
+
+                                        var implName = (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue();
+                                        var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
+                                        var implClazzType = implClazz == null ? annotationInfo.self.asType() : (TypeMirror) implClazz.getValue();
+                                        if (!(implClazzType instanceof DeclaredType declaredImplClazzType)) {
+                                            throw new IllegalArgumentException(String.format("clazz of @PolymorphicSignature must be a declared type, not '%s'", implClazzType));
+                                        }
+                                        var implReceiver = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.owner : elements.getBinaryName((TypeElement) declaredImplClazzType.asElement()).toString().replace('.', '/');
+
+                                        List<Integer> receiverArgIdxs = new ArrayList<>();
+                                        List<Integer> callerArgIdxs = new ArrayList<>();
+
+                                        ExecutableElement metafactoryElement = findMethodMatching(
+                                            implReceiver,
+                                            implName,
+                                            desc -> Type.getReturnType(desc).getDescriptor().equals(CallSite.class.descriptorString()) &&
+                                                Type.getArgumentCount(desc) >= 3 &&
+                                                Type.getArgumentTypes(desc)[0].getDescriptor().equals(MethodHandles.Lookup.class.descriptorString()) &&
+                                                Type.getArgumentTypes(desc)[1].getDescriptor().equals(String.class.descriptorString()) &&
+                                                Type.getArgumentTypes(desc)[2].getDescriptor().equals(MethodType.class.descriptorString()),
+                                            binaryBridge,
+                                            descriptors
+                                        );
+                                        if (metafactoryElement == null) {
+                                            throw new IllegalArgumentException(String.format("Could not find metafactory %s in %s", implName, implReceiver));
+                                        }
+                                        for (int i = 0; i < metafactoryElement.getParameters().size(); i++) {
+                                            var param = metafactoryElement.getParameters().get(i);
+                                            String used = null;
+                                            if (param.getAnnotation(Bootstrap.Receiver.class) != null) {
+                                                used = "@Receiver";
+                                                if (!descriptors.descriptor(param.asType()).equals(Class.class.descriptorString())) {
+                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class argument of metafactory %s in %s", implName, implReceiver));
+                                                } else {
+                                                    receiverArgIdxs.add(i - 3);
                                                 }
                                             }
-
-                                            var descriptor = MethodTypeDesc.ofDescriptor(methodInsn.desc);
-
-                                            // if non-static, prepend the receiver type
-                                            if (methodInsn.getOpcode() != Opcodes.INVOKESTATIC) {
-                                                descriptor = descriptor.insertParameterTypes(0, ClassDesc.ofInternalName(methodInsn.owner));
+                                            if (param.getAnnotation(Bootstrap.Caller.class) != null) {
+                                                if (used != null) {
+                                                    throw new IllegalArgumentException(String.format("Bootstrap parameter cannot have both @Caller and %s", used));
+                                                }
+                                                used = "@Caller";
+                                                var desc = descriptors.descriptor(param.asType());
+                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString())) {
+                                                    throw new IllegalArgumentException(String.format("Found @Caller on non-Class or Method argument of metafactory %s in %s", implName, implReceiver));
+                                                } else {
+                                                    callerArgIdxs.add(i - 3);
+                                                }
                                             }
-
-                                            descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor, methodElement.isVarArgs());
-                                            if (descriptor == null) {
-                                                continue;
-                                            }
-
-                                            var implName = (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue();
-                                            var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
-                                            var implClazzType = implClazz == null ? annotationInfo.self.asType() : (TypeMirror) implClazz.getValue();
-                                            if (!(implClazzType instanceof DeclaredType declaredImplClazzType)) {
-                                                throw new IllegalArgumentException(String.format("clazz of @PolymorphicSignature must be a declared type, not '%s'", implClazzType));
-                                            }
-                                            var implReceiver = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.owner : elements.getBinaryName((TypeElement) declaredImplClazzType.asElement()).toString().replace('.', '/');
-                                            var isInterface = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.itf : declaredImplClazzType.asElement().getKind() == ElementKind.INTERFACE;
-                                            idx = node.instructions.indexOf(insn);
-                                            node.instructions.set(insn, new InvokeDynamicInsnNode(
-                                                    methodInsn.name,
-                                                    descriptor.descriptorString(),
-                                                    new Handle(
-                                                            Opcodes.H_INVOKESTATIC,
-                                                            implReceiver,
-                                                            implName,
-                                                            MethodType.methodType(CallSite.class, MethodHandles.Lookup.class, String.class, MethodType.class).descriptorString(),
-                                                            isInterface
-                                                    )
-                                            ));
                                         }
+
+                                        var isInterface = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.itf : declaredImplClazzType.asElement().getKind() == ElementKind.INTERFACE;
+                                        idx = node.instructions.indexOf(insn);
+                                        Object[] args = new Object[metafactoryElement.getParameters().size() - 3];
+                                        for (int i : receiverArgIdxs) {
+                                            args[i] = Type.getObjectType(methodInsn.owner);
+                                        }
+                                        var metafactoryDescriptor = descriptors.descriptor(metafactoryElement.asType());
+                                        var metafactoryParameterTypes = Type.getArgumentTypes(metafactoryDescriptor);
+                                        for (int i : callerArgIdxs) {
+                                            var desc = metafactoryParameterTypes[i + 3].getDescriptor();
+                                            if (desc.equals(Class.class.descriptorString())) {
+                                                args[i] = Type.getObjectType(binaryName.replace('.', '/'));
+                                            } else {
+                                                // Method
+                                                var callerDesc = MethodTypeDesc.ofDescriptor(ownerDescriptor);
+                                                var declaredMethodArgs = new ConstantDesc[callerDesc.parameterCount() + 2];
+                                                declaredMethodArgs[0] = ClassDesc.of(binaryName);
+                                                declaredMethodArgs[1] = ownerName;
+                                                for (int j = 0; j < callerDesc.parameterCount(); j++) {
+                                                    declaredMethodArgs[j + 2] = callerDesc.parameterType(j);
+                                                }
+                                                args[i] = BackendASM.ConstantsASM.toAsm(Constants.invokeConstant(
+                                                    Constants.from(Method.class),
+                                                    MethodHandleDesc.ofMethod(
+                                                        DirectMethodHandleDesc.Kind.VIRTUAL,
+                                                        Constants.from(Class.class),
+                                                        "getDeclaredMethod",
+                                                        Constants.from(MethodType.methodType(Method.class, String.class, Class[].class))
+                                                    ),
+                                                    declaredMethodArgs
+                                                ));
+                                            }
+                                        }
+                                        node.instructions.set(insn, new InvokeDynamicInsnNode(
+                                                methodInsn.name,
+                                                descriptor.descriptorString(),
+                                                new Handle(
+                                                        Opcodes.H_INVOKESTATIC,
+                                                        implReceiver,
+                                                        implName,
+                                                        metafactoryDescriptor,
+                                                        isInterface
+                                                ),
+                                            args
+                                        ));
                                     }
                                 }
                             }
                         }
-                        node.accept(superVisitor);
+                        node.accept(superVisitor.get());
                     }
                 };
             }
         };
+    }
+
+    private static @Nullable ExecutableElement findMethodMatching(MethodInsnNode methodInsn, Context.BinaryBridge binaryBridge, DescriptorTypeVisitor descriptors) {
+        return findMethodMatching(methodInsn.owner, methodInsn.name, methodInsn.desc::equals, binaryBridge, descriptors);
+    }
+
+    private static @Nullable ExecutableElement findMethodMatching(String owner, String name, Predicate<String> desc, Context.BinaryBridge binaryBridge, DescriptorTypeVisitor descriptors) {
+        var element = binaryBridge.elementByInternalName(owner);
+        if (element != null) {
+            ExecutableElement methodElement = null;
+            for (var el : element.getEnclosedElements()) {
+                if (el instanceof ExecutableElement executableElement) {
+                    if (executableElement.getSimpleName().contentEquals(name) && desc.test(descriptors.descriptor(executableElement.asType()))) {
+                        methodElement = executableElement;
+                    }
+                }
+            }
+            return methodElement;
+        }
+        return null;
     }
 
     private final Map<String, Type> UNBOXING_TYPES = Map.of(

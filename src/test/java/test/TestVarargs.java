@@ -16,6 +16,10 @@ public class TestVarargs {
     static MethodType objects(Object... objects) {
         throw new AssertionError();
     }
+    @PolymorphicSignature("metafactory")
+    static MethodType longprimitives(double... doubles) {
+        throw new AssertionError();
+    }
 
     static CallSite metafactory(MethodHandles.Lookup lookup, String name, MethodType type) {
         return new ConstantCallSite(MethodHandles.dropArguments(
@@ -27,5 +31,6 @@ public class TestVarargs {
     static void main(String... args) {
         System.out.println(primitives(1, 2, 3));
         System.out.println(objects("a", "b", "c"));
+        System.out.println(longprimitives(1, 2, 3));
     }
 }
