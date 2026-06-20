@@ -11,14 +11,10 @@ import java.lang.reflect.Array;
 
 public class TestPolymorphic {
     @PolymorphicSignature("defaultValueMetafactory")
-    public static <T> T defaultValue() {
-        throw new AssertionError();
-    }
+    public native static <T> T defaultValue();
 
     @PolymorphicSignature("argClassMetafactory")
-    public final <T> Class<? super T> argClass(T value) {
-        throw new AssertionError();
-    }
+    public native final <T> Class<? super T> argClass(T value);
 
     public static CallSite defaultValueMetafactory(MethodHandles.Lookup lookup, String name, MethodType type) {
         return new ConstantCallSite(MethodHandles.constant(
@@ -37,7 +33,7 @@ public class TestPolymorphic {
     static void main() {
         class SomeLocalThing {
             @PolymorphicSignature("metafactory")
-            static <T> void localPolymorphic(T value) {}
+            native static <T> void localPolymorphic(T value);
 
             public static CallSite metafactory(MethodHandles.Lookup lookup, String name, MethodType type) throws Throwable {
                 var handle = MethodHandles.dropArguments(lookup.findVirtual(PrintStream.class, "println", MethodType.methodType(void.class, Object.class))

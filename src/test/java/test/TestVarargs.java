@@ -9,17 +9,11 @@ import java.lang.invoke.MethodType;
 
 public class TestVarargs {
     @PolymorphicSignature("metafactory")
-    static MethodType primitives(int... ints) {
-        throw new AssertionError();
-    }
+    static native MethodType primitives(int... ints);
     @PolymorphicSignature("metafactory")
-    static MethodType objects(Object... objects) {
-        throw new AssertionError();
-    }
+    static native MethodType objects(Object... objects);
     @PolymorphicSignature("metafactory")
-    static MethodType longprimitives(double... doubles) {
-        throw new AssertionError();
-    }
+    static native MethodType longprimitives(double... doubles);
 
     static CallSite metafactory(MethodHandles.Lookup lookup, String name, MethodType type) {
         return new ConstantCallSite(MethodHandles.dropArguments(

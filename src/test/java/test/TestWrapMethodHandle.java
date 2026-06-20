@@ -11,9 +11,7 @@ import java.lang.invoke.MethodType;
 
 public class TestWrapMethodHandle {
     @PolymorphicSignature("metafactory")
-    static Object invoke(MethodHandle handle, Object... args) {
-        throw new AssertionError();
-    }
+    native static Object invoke(MethodHandle handle, Object... args);
 
     static CallSite metafactory(MethodHandles.Lookup lookup, String name, MethodType methodType) throws NoSuchMethodException, IllegalAccessException {
         return new ConstantCallSite(lookup.findVirtual(MethodHandle.class, "invoke", methodType.dropParameterTypes(0, 1)));

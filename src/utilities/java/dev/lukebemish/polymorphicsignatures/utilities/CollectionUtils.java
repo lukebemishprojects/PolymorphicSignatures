@@ -26,9 +26,7 @@ public final class CollectionUtils {
     /// @param <A> the type of the array to create; will be inferred at compile time.
     /// @throws IllegalArgumentException if the inferred type is not an array type or assignable from `Object[]`
     @PolymorphicSignature("$array")
-    public static <A extends Cloneable & Serializable> A array(int size) {
-        throw new AssertionError();
-    }
+    public native static <A extends Cloneable & Serializable> A array(int size);
 
     private CollectionUtils() {}
 
