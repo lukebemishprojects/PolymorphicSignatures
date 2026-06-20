@@ -431,8 +431,12 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
 
             var idx = method.instructions.indexOf(methodInsn);
             AbstractInsnNode followingNode;
-            while ((followingNode = method.instructions.get(idx + 1)) instanceof TypeInsnNode || followingNode instanceof MethodInsnNode) {
-                if (followingNode instanceof TypeInsnNode typeInsnNode) {
+            while ((followingNode = method.instructions.get(idx + 1)) instanceof TypeInsnNode || followingNode instanceof MethodInsnNode || followingNode.getOpcode() == Opcodes.POP) {
+                if (followingNode.getOpcode() == Opcodes.POP) {
+                    descriptor = descriptor.changeReturnType(ClassDesc.ofDescriptor("V"));
+                    toRemove.add(followingNode);
+                    break;
+                } else if (followingNode instanceof TypeInsnNode typeInsnNode) {
                     if (typeInsnNode.getOpcode() == Opcodes.CHECKCAST) {
                         descriptor = descriptor.changeReturnType(typeInsnNode.desc.startsWith("[") ? ClassDesc.ofDescriptor(typeInsnNode.desc) : ClassDesc.of(typeInsnNode.desc.replace('/', '.')));
                         toRemove.add(typeInsnNode);

@@ -23,8 +23,8 @@ public final class CollectionUtils {
     /// List<String>[] strings = array(10);
     /// ```
     /// @param size the size of the array to create
-    /// @param <A> the type of the array to create; will be inferred at compile time.
-    /// @throws IllegalArgumentException if the inferred type is not an array type or assignable from `Object[]`
+    /// @param <A> the type of the array to create; will be inferred at compile time
+    /// @throws UnsupportedOperationException if the inferred type is not an array type or assignable from `Object[]`
     @PolymorphicSignature("$array")
     public native static <A extends Cloneable & Serializable> A array(int size);
 
@@ -39,8 +39,8 @@ public final class CollectionUtils {
         }
         return new ConstantCallSite(
             MethodHandles.dropArguments(
-                MethodHandles.throwException(type.returnType(), IllegalArgumentException.class)
-                    .bindTo(new IllegalArgumentException(String.format("Type '%s' is not an array type", type.returnType()))),
+                MethodHandles.throwException(type.returnType(), UnsupportedOperationException.class)
+                    .bindTo(new UnsupportedOperationException(String.format("Type '%s' is not an array type", type.returnType()))),
                 0, int.class
             )
         );
