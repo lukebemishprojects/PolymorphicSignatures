@@ -8,6 +8,7 @@ import dev.lukebemish.polymorphicsignatures.Bootstrap;
 import dev.lukebemish.polymorphicsignatures.PolymorphicSignature;
 import org.jspecify.annotations.Nullable;
 import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ConstantDynamic;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -179,8 +180,9 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             String used = null;
                                             if (param.getAnnotation(Bootstrap.Receiver.class) != null) {
                                                 used = "@Receiver";
-                                                if (!descriptors.descriptor(param.asType()).equals(Class.class.descriptorString())) {
-                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class argument of metafactory %s in %s", implName, implReceiver));
+                                                var desc = descriptors.descriptor(param.asType());
+                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString())) {
+                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class or Method argument of metafactory %s in %s", implName, implReceiver));
                                                 } else {
                                                     receiverArgIdxs.add(i - 3);
                                                 }
@@ -202,34 +204,25 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                         var isInterface = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.itf : declaredImplClazzType.asElement().getKind() == ElementKind.INTERFACE;
                                         idx = node.instructions.indexOf(insn);
                                         Object[] args = new Object[metafactoryElement.getParameters().size() - 3];
-                                        for (int i : receiverArgIdxs) {
-                                            args[i] = Type.getObjectType(methodInsn.owner);
-                                        }
                                         var metafactoryDescriptor = descriptors.descriptor(metafactoryElement.asType());
                                         var metafactoryParameterTypes = Type.getArgumentTypes(metafactoryDescriptor);
+
+                                        for (int i : receiverArgIdxs) {
+                                            var desc = metafactoryParameterTypes[i + 3].getDescriptor();
+                                            if (desc.equals(Class.class.descriptorString())) {
+                                                args[i] = Type.getObjectType(methodInsn.owner);
+                                            } else {
+                                                // Method
+                                                args[i] = getMethodConstant(methodInsn.desc, methodInsn.owner.replace('/', '.'), methodInsn.name);
+                                            }
+                                        }
                                         for (int i : callerArgIdxs) {
                                             var desc = metafactoryParameterTypes[i + 3].getDescriptor();
                                             if (desc.equals(Class.class.descriptorString())) {
                                                 args[i] = Type.getObjectType(binaryName.replace('.', '/'));
                                             } else {
                                                 // Method
-                                                var callerDesc = MethodTypeDesc.ofDescriptor(ownerDescriptor);
-                                                var declaredMethodArgs = new ConstantDesc[callerDesc.parameterCount() + 2];
-                                                declaredMethodArgs[0] = ClassDesc.of(binaryName);
-                                                declaredMethodArgs[1] = ownerName;
-                                                for (int j = 0; j < callerDesc.parameterCount(); j++) {
-                                                    declaredMethodArgs[j + 2] = callerDesc.parameterType(j);
-                                                }
-                                                args[i] = BackendASM.ConstantsASM.toAsm(Constants.invokeConstant(
-                                                    Constants.from(Method.class),
-                                                    MethodHandleDesc.ofMethod(
-                                                        DirectMethodHandleDesc.Kind.VIRTUAL,
-                                                        Constants.from(Class.class),
-                                                        "getDeclaredMethod",
-                                                        Constants.from(MethodType.methodType(Method.class, String.class, Class[].class))
-                                                    ),
-                                                    declaredMethodArgs
-                                                ));
+                                                args[i] = getMethodConstant(ownerDescriptor, binaryName, ownerName);
                                             }
                                         }
                                         node.instructions.set(insn, new InvokeDynamicInsnNode(
@@ -253,6 +246,26 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 };
             }
         };
+    }
+
+    private static ConstantDynamic getMethodConstant(String desc, String owner, String descriptor) {
+        var callerDesc = MethodTypeDesc.ofDescriptor(desc);
+        var declaredMethodArgs = new ConstantDesc[callerDesc.parameterCount() + 2];
+        declaredMethodArgs[0] = ClassDesc.of(owner);
+        declaredMethodArgs[1] = descriptor;
+        for (int j = 0; j < callerDesc.parameterCount(); j++) {
+            declaredMethodArgs[j + 2] = callerDesc.parameterType(j);
+        }
+        return BackendASM.ConstantsASM.toAsm(Constants.invokeConstant(
+            Constants.from(Method.class),
+            MethodHandleDesc.ofMethod(
+                DirectMethodHandleDesc.Kind.VIRTUAL,
+                Constants.from(Class.class),
+                "getDeclaredMethod",
+                Constants.from(MethodType.methodType(Method.class, String.class, Class[].class))
+            ),
+            declaredMethodArgs
+        ));
     }
 
     private static @Nullable ExecutableElement findMethodMatching(MethodInsnNode methodInsn, Context.BinaryBridge binaryBridge, DescriptorTypeVisitor descriptors) {
