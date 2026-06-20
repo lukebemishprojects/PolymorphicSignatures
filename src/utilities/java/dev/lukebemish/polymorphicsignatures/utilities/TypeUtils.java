@@ -8,6 +8,7 @@ import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.function.Consumer;
 
 public class TypeUtils {
     /// {@return the default value of the output type}
@@ -33,6 +34,26 @@ public class TypeUtils {
     /// @throws UnsupportedOperationException if the type does not have a known or accessible NaN value
     @PolymorphicSignature("$typeNaN")
     public native static <T extends Number> T typeNaN();
+
+    /// {@return the input value unmodified}
+    /// This method returns the input value unmodified, but passes to the supplied consumer the compile-time inferred
+    /// type of the parameter value. This is useful for debugging {@link PolymorphicSignature} methods.
+    /// @param <T> the type of the value; will be inferred at compile time
+    /// @param value the value to pass unmodified and uninspected
+    /// @param consumer the consumer to feed the inferred type to
+    /// @see #reportReturnType(Object, Consumer)
+    @PolymorphicSignature("$reportType")
+    public native static <T> T reportParameterType(T value, Consumer<? super Class<? extends T>> consumer);
+
+    /// {@return the input value unmodified}
+    /// This method returns the input value unmodified, but passes to the supplied consumer the compile-time inferred
+    /// type of the method return. This is useful for debugging {@link PolymorphicSignature} methods.
+    /// @param <T> the type of the value; will be inferred at compile time
+    /// @param value the value to pass unmodified and uninspected
+    /// @param consumer the consumer to feed the inferred type to
+    /// @see #reportParameterType(Object, Consumer)
+    @PolymorphicSignature("$reportType")
+    public native static <T> T reportReturnType(T value, Consumer<? super Class<? extends T>> consumer);
 
     @ApiStatus.Internal
     public static CallSite $defaultValue(MethodHandles.Lookup lookup, String name, MethodType type) {
@@ -90,5 +111,16 @@ public class TypeUtils {
             }
         }
         return new ConstantCallSite(handle);
+    }
+
+    @ApiStatus.Internal
+    public static CallSite $reportType(MethodHandles.Lookup lookup, String name, MethodType type) throws NoSuchMethodException, IllegalAccessException {
+        var valueType = name.equals("reportParameterType") ? type.parameterType(0) : type.returnType();
+        var consume = MethodHandles.permuteArguments(
+            MethodHandles.lookup().findVirtual(Consumer.class, "accept", MethodType.methodType(void.class, Object.class)),
+            MethodType.methodType(void.class, Object.class, Consumer.class),
+            1, 0
+        ).bindTo(valueType);
+        return new ConstantCallSite(MethodHandles.collectArguments(MethodHandles.identity(type.parameterType(0)), 1, consume).asType(type));
     }
 }

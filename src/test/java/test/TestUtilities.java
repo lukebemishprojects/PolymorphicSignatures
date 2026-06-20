@@ -15,6 +15,9 @@ public class TestUtilities {
         System.out.println((float) TypeUtils.typeMax());
         System.out.println((Float) TypeUtils.typeMin());
         System.out.println((Double) TypeUtils.typeNaN());
+        TypeUtils.reportParameterType(1, System.out::println);
+        TypeUtils.reportParameterType("abcd", System.out::println);
+        TypeUtils.reportReturnType("abcd", System.out::println);
         TypeUtils.defaultValue();
     }
 }
