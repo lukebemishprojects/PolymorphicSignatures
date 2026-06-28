@@ -36,7 +36,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 public class Dynamic {
-    public static CallSite dynamic(MethodHandles.Lookup lookup, String name, MethodType methodType, @Bootstrap.Receiver Method receiver) throws IllegalAccessException, NoSuchMethodException {
+    public static CallSite dynamic(MethodHandles.Lookup lookup, String name, MethodType methodType, @Bootstrap.Receiver Method receiver, @Bootstrap.Receiver MethodHandles.Lookup receiverLookup) throws IllegalAccessException, NoSuchMethodException {
         if (!receiver.accessFlags().contains(AccessFlag.STATIC)) {
             return new ConstantCallSite(MethodHandles.dropArguments(
                 MethodHandles.throwException(methodType.returnType(), IllegalArgumentException.class)
@@ -54,6 +54,17 @@ public class Dynamic {
                     for (int i = 0; i < parameterCount; i++) {
                         var paramType = method.getParameterTypes()[i];
                         var targetType = methodType.parameterType(i);
+                        if (paramType.isPrimitive() || targetType.isPrimitive()) {
+                            if (paramType.isPrimitive() && targetType.isPrimitive()) {
+                                return paramType.equals(targetType);
+                            }
+                            if (paramType.isPrimitive()) {
+                                paramType = BOX.get(paramType);
+                            } else {
+                                targetType = BOX.get(targetType);
+                            }
+                        }
+                        // Comparison with only boxed types
                         if (!paramType.isAssignableFrom(targetType) && !targetType.isAssignableFrom(paramType)) {
                             return false;
                         }
@@ -66,7 +77,7 @@ public class Dynamic {
             return new ConstantCallSite(unresolveable(methodType));
         }
 
-        var hiddenImpl = generateSwitchImpl(lookup, candidates, methodType);
+        var hiddenImpl = generateSwitchImpl(lookup, receiverLookup, candidates, methodType);
         return new ConstantCallSite(hiddenImpl.findStatic(
             hiddenImpl.lookupClass(),
             "impl",
@@ -92,6 +103,17 @@ public class Dynamic {
         nodesVals.sort(Comparator.comparing(n -> n.in().size()));
         List<? extends Class<?>> classList = nodesVals.stream().map(Node::value).toList();
         Comparator<Class<?>> clazzSorter = (a, b) -> {
+            if (a.isPrimitive() || b.isPrimitive()) {
+                if (a.isPrimitive() && b.isPrimitive()) {
+                    return 0; // equal or incompatible
+                }
+                if (a.isPrimitive()) {
+                    a = BOX.get(a);
+                }
+                if (b.isPrimitive()) {
+                    b = BOX.get(b);
+                }
+            }
             if (a.equals(b)) {
                 return 0;
             } else if (a.isAssignableFrom(b)) {
@@ -177,7 +199,7 @@ public class Dynamic {
         return map;
     }
 
-    private static MethodHandles.Lookup generateSwitchImpl(MethodHandles.Lookup lookup, List<Method> candidates, MethodType methodType) {
+    private static MethodHandles.Lookup generateSwitchImpl(MethodHandles.Lookup lookup, MethodHandles.Lookup receiverLookup, List<Method> candidates, MethodType methodType) {
         List<MethodHandle> handles = new ArrayList<>();
         var hiddenDesc = ClassDesc.of(lookup.lookupClass().getName()+"$Dynamic");
         var hiddenBytes = ClassFile.of().build(
@@ -186,7 +208,7 @@ public class Dynamic {
                 classBuilder.withMethod("impl", methodType.describeConstable().orElseThrow(), Modifier.PUBLIC | Modifier.STATIC, methodBuilder -> {
                     methodBuilder.withCode(code -> {
                         var finalLabel = code.newLabel();
-                        switchTable(lookup, code, candidates, 0, methodType, handles, finalLabel);
+                        switchTable(receiverLookup, code, candidates, 0, methodType, handles, finalLabel);
                         handles.add(unresolveable(methodType));
                         code.ldc(loadClassHandle(handles.size() - 1));
                         code.goto_(finalLabel);
@@ -209,6 +231,17 @@ public class Dynamic {
         return unchecked(() -> lookup.defineHiddenClassWithClassData(hiddenBytes, handles, false));
     }
 
+    private static final Map<Class<?>, Class<?>> BOX = Map.of(
+        byte.class, Byte.class,
+        short.class, Short.class,
+        int.class, Integer.class,
+        long.class, Long.class,
+        float.class, Float.class,
+        double.class, Double.class,
+        char.class, Character.class,
+        boolean.class, Boolean.class
+    );
+
     private static void switchTable(MethodHandles.Lookup lookup, CodeBuilder code, List<Method> candidates, int i, MethodType methodType, List<MethodHandle> handles, Label finalLabel) {
         if (i == methodType.parameterCount()) {
             MethodHandle handle;
@@ -222,6 +255,7 @@ public class Dynamic {
             code.goto_(finalLabel);
             return;
         }
+
         var map = orderCandidates(candidates, i);
         var orderedValues = new ArrayList<>(map.sequencedValues());
         var orderedKeys = new ArrayList<>(map.sequencedKeySet());

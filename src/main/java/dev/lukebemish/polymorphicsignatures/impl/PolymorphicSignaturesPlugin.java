@@ -44,6 +44,7 @@ import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -90,6 +91,8 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         return "dev.lukebemish.polymorphic-signatures";
     }
 
+    private record MetafactoryImplInfo(String implReceiver, String implName, @Nullable DeclaredType receiverTypeIfNonSelf) {}
+
     @Override
     public ClassVisitor visit(ClassVisitor next, String binaryName, JavaFileManager fileManager, JavaFileManager.Location location) {
         var elements = Objects.requireNonNull(this.elements);
@@ -98,10 +101,21 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         var descriptors = new DescriptorTypeVisitor(elements, types);
         var annotationInfo = new AnnotationInfo(elements);
         return new ClassVisitor(Opcodes.ASM9, next) {
+            boolean isThisClassInterface;
+
+            @Override
+            public void visit(int version, int access, String name, String signature, String superName, String[] interfaces) {
+                if ((access & Opcodes.ACC_INTERFACE) != 0) {
+                    isThisClassInterface = true;
+                }
+                super.visit(version, access, name, signature, superName, interfaces);
+            }
+
             @Override
             public MethodVisitor visitMethod(int access, String ownerName, String ownerDescriptor, String signature, String[] exceptions) {
                 var node = new MethodNode(access, ownerName, ownerDescriptor, signature, exceptions);
                 Supplier<MethodVisitor> superVisitor = () -> super.visitMethod(node.access, ownerName, ownerDescriptor, signature, exceptions);
+                var cwDelegate = this.getDelegate();
                 return new MethodVisitor(Opcodes.ASM9, node) {
                     @Override
                     public void visitEnd() {
@@ -121,6 +135,84 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                     insnList.add(new InsnNode(Opcodes.ATHROW));
                                     node.instructions = insnList;
                                     node.access &= ~(Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT);
+
+                                    // Check for `@Bootstrap.Reeiver` on MethodHandles.Lookup and generate a bounce if one is present
+                                    ExecutableElement methodElement = findMethodMatching(
+                                        binaryName.replace('.', '/'), ownerName, ownerDescriptor::equals,
+                                        binaryBridge,
+                                        descriptors
+                                    );
+                                    if (methodElement == null) {
+                                        throw new IllegalArgumentException("Cannot find ExecutableElement for annotated method!");
+                                    }
+                                    var metaImplInfo = getMetaImplInfoOfElement(binaryName.replace('.', '/'), methodElement, types, annotationInfo, elements);
+                                    if (metaImplInfo.receiverTypeIfNonSelf != null) {
+                                        ExecutableElement metafactoryElement = locateMetafactoryElement(metaImplInfo, binaryBridge, descriptors);
+                                        if (metafactoryElement == null) {
+                                            throw new IllegalArgumentException(String.format("Could not find metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
+                                        }
+                                        // If it has any @Bootstrap.Receiver MethodHandles.Lookup arguments, make a bounce method
+                                        var originalDescriptor = descriptors.descriptor(metafactoryElement.asType());
+                                        var unBootstrapArgs = new ArrayList<String>();
+                                        var insertLookupIdxs = new HashSet<Integer>();
+                                        for (int i = 0; i < metafactoryElement.getParameters().size(); i++) {
+                                            var param = metafactoryElement.getParameters().get(i);
+                                            if (param.getAnnotation(Bootstrap.Receiver.class) != null) {
+                                                var desc = descriptors.descriptor(param.asType());
+                                                if (desc.equals(MethodHandles.Lookup.class.descriptorString())) {
+                                                    insertLookupIdxs.add(i);
+                                                    continue;
+                                                }
+                                            }
+                                            unBootstrapArgs.add(descriptors.descriptor(param.asType()));
+                                        }
+                                        var unBootstrapDescriptor = "(" + String.join("", unBootstrapArgs) + ")" + Type.getReturnType(originalDescriptor);
+                                        if (!unBootstrapDescriptor.equals(originalDescriptor)) {
+                                            // They differ!
+                                            // ...so we generate a bounce method
+                                            var mv = cwDelegate.visitMethod(
+                                                (access | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC) & ~(Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT | Opcodes.ACC_FINAL),
+                                                "$" + ownerName + "$" + metaImplInfo.implName,
+                                                unBootstrapDescriptor,
+                                                null,
+                                                null
+                                            );
+                                            mv.visitCode();
+
+                                            int offset = 0;
+                                            for (int i = 0; i < Type.getArgumentCount(originalDescriptor); i++) {
+                                                if (insertLookupIdxs.contains(i)) {
+                                                    offset -= 1;
+                                                    mv.visitMethodInsn(
+                                                        Opcodes.INVOKESTATIC,
+                                                        Type.getInternalName(MethodHandles.class),
+                                                        "lookup",
+                                                        MethodType.methodType(MethodHandles.Lookup.class).descriptorString(),
+                                                        false
+                                                    );
+                                                } else {
+                                                    mv.visitVarInsn(
+                                                        Type.getArgumentTypes(originalDescriptor)[i].getOpcode(Opcodes.ILOAD),
+                                                        i + offset
+                                                    );
+                                                }
+                                            }
+
+                                            var isInterface = metaImplInfo.receiverTypeIfNonSelf.asElement().getKind() == ElementKind.INTERFACE;
+                                            mv.visitMethodInsn(
+                                                Opcodes.INVOKESTATIC,
+                                                metaImplInfo.implReceiver,
+                                                metaImplInfo.implName,
+                                                originalDescriptor,
+                                                isInterface
+                                            );
+
+                                            mv.visitInsn(Type.getReturnType(originalDescriptor).getOpcode(Opcodes.IRETURN));
+
+                                            mv.visitMaxs(0, 0);
+                                            mv.visitEnd();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -131,13 +223,6 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                 ExecutableElement methodElement = findMethodMatching(methodInsn, binaryBridge, descriptors);
                                 if (methodElement != null) {
                                     if (methodElement.getAnnotation(PolymorphicSignature.class) != null) {
-                                        AnnotationMirror mirror = null;
-                                        for (var aMirror : methodElement.getAnnotationMirrors()) {
-                                            if (types.isSameType(aMirror.getAnnotationType(), annotationInfo.annotation().asType())) {
-                                                mirror = aMirror;
-                                            }
-                                        }
-
                                         var descriptor = MethodTypeDesc.ofDescriptor(methodInsn.desc);
 
                                         // if non-static, prepend the receiver type
@@ -150,30 +235,14 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             continue;
                                         }
 
-                                        var implName = (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue();
-                                        var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
-                                        var implClazzType = implClazz == null ? annotationInfo.self.asType() : (TypeMirror) implClazz.getValue();
-                                        if (!(implClazzType instanceof DeclaredType declaredImplClazzType)) {
-                                            throw new IllegalArgumentException(String.format("clazz of @PolymorphicSignature must be a declared type, not '%s'", implClazzType));
-                                        }
-                                        var implReceiver = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.owner : elements.getBinaryName((TypeElement) declaredImplClazzType.asElement()).toString().replace('.', '/');
+                                        var metaImplInfo = getMetaImplInfoOfElement(methodInsn.owner, methodElement, types, annotationInfo, elements);
 
                                         List<Integer> receiverArgIdxs = new ArrayList<>();
                                         List<Integer> callerArgIdxs = new ArrayList<>();
 
-                                        ExecutableElement metafactoryElement = findMethodMatching(
-                                            implReceiver,
-                                            implName,
-                                            desc -> Type.getReturnType(desc).getDescriptor().equals(CallSite.class.descriptorString()) &&
-                                                Type.getArgumentCount(desc) >= 3 &&
-                                                Type.getArgumentTypes(desc)[0].getDescriptor().equals(MethodHandles.Lookup.class.descriptorString()) &&
-                                                Type.getArgumentTypes(desc)[1].getDescriptor().equals(String.class.descriptorString()) &&
-                                                Type.getArgumentTypes(desc)[2].getDescriptor().equals(MethodType.class.descriptorString()),
-                                            binaryBridge,
-                                            descriptors
-                                        );
+                                        ExecutableElement metafactoryElement = locateMetafactoryElement(metaImplInfo, binaryBridge, descriptors);
                                         if (metafactoryElement == null) {
-                                            throw new IllegalArgumentException(String.format("Could not find metafactory %s in %s", implName, implReceiver));
+                                            throw new IllegalArgumentException(String.format("Could not find metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
                                         }
                                         for (int i = 0; i < metafactoryElement.getParameters().size(); i++) {
                                             var param = metafactoryElement.getParameters().get(i);
@@ -181,8 +250,8 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             if (param.getAnnotation(Bootstrap.Receiver.class) != null) {
                                                 used = "@Receiver";
                                                 var desc = descriptors.descriptor(param.asType());
-                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString())) {
-                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class or Method argument of metafactory %s in %s", implName, implReceiver));
+                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString()) && !desc.equals(MethodHandles.Lookup.class.descriptorString())) {
+                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class or Method argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
                                                 } else {
                                                     receiverArgIdxs.add(i - 3);
                                                 }
@@ -194,26 +263,51 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                 used = "@Caller";
                                                 var desc = descriptors.descriptor(param.asType());
                                                 if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString())) {
-                                                    throw new IllegalArgumentException(String.format("Found @Caller on non-Class or Method argument of metafactory %s in %s", implName, implReceiver));
+                                                    throw new IllegalArgumentException(String.format("Found @Caller on non-Class or Method argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
                                                 } else {
                                                     callerArgIdxs.add(i - 3);
                                                 }
                                             }
                                         }
 
-                                        var isInterface = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType()) ? methodInsn.itf : declaredImplClazzType.asElement().getKind() == ElementKind.INTERFACE;
                                         idx = node.instructions.indexOf(insn);
                                         Object[] args = new Object[metafactoryElement.getParameters().size() - 3];
                                         var metafactoryDescriptor = descriptors.descriptor(metafactoryElement.asType());
                                         var metafactoryParameterTypes = Type.getArgumentTypes(metafactoryDescriptor);
 
+                                        var dummyLookupArg = new Object();
+
                                         for (int i : receiverArgIdxs) {
                                             var desc = metafactoryParameterTypes[i + 3].getDescriptor();
                                             if (desc.equals(Class.class.descriptorString())) {
                                                 args[i] = Type.getObjectType(methodInsn.owner);
-                                            } else {
+                                            } else if (desc.equals(Method.class.descriptorString())) {
                                                 // Method
                                                 args[i] = getMethodConstant(methodInsn.desc, methodInsn.owner.replace('/', '.'), methodInsn.name);
+                                            } else {
+                                                // MethodHandles.Lookup
+                                                if (metaImplInfo.receiverTypeIfNonSelf != null) {
+                                                    args[i] = dummyLookupArg;
+                                                    metaImplInfo = new MetafactoryImplInfo(
+                                                        methodInsn.owner,
+                                                        "$" + methodInsn.name + "$" + metaImplInfo.implName,
+                                                        null
+                                                    );
+                                                } else {
+                                                    // the metafactory is in the same class
+                                                    // so we can just add a CON_DYN for MethodHandles.lookup() and it'll work
+                                                    args[i] = BackendASM.ConstantsASM.toAsm(
+                                                        Constants.invokeConstant(
+                                                            Constants.from(MethodHandles.Lookup.class),
+                                                            MethodHandleDesc.ofMethod(
+                                                                DirectMethodHandleDesc.Kind.STATIC,
+                                                                Constants.from(MethodHandles.class),
+                                                                "lookup",
+                                                                Constants.from(MethodType.methodType(MethodHandles.Lookup.class))
+                                                            )
+                                                        )
+                                                    );
+                                                }
                                             }
                                         }
                                         for (int i : callerArgIdxs) {
@@ -225,17 +319,33 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                 args[i] = getMethodConstant(ownerDescriptor, binaryName, ownerName);
                                             }
                                         }
+
+                                        var metafactoryArgTypes = new ArrayList<String>();
+                                        var argList = new ArrayList<>();
+                                        for (int i = 0; i < 3; i++) {
+                                            metafactoryArgTypes.add(Type.getArgumentTypes(metafactoryDescriptor)[i].getDescriptor());
+                                        }
+                                        for (int i = 0; i < args.length; i++) {
+                                            var arg = args[i];
+                                            if (arg != dummyLookupArg) {
+                                                argList.add(arg);
+                                                metafactoryArgTypes.add(Type.getArgumentTypes(metafactoryDescriptor)[i+3].getDescriptor());
+                                            }
+                                        }
+                                        metafactoryDescriptor = "(" + String.join("", metafactoryArgTypes) + ")" + Type.getReturnType(metafactoryDescriptor);
+
+                                        var isInterface = metaImplInfo.receiverTypeIfNonSelf == null ? methodInsn.itf : metaImplInfo.receiverTypeIfNonSelf.asElement().getKind() == ElementKind.INTERFACE;
                                         node.instructions.set(insn, new InvokeDynamicInsnNode(
                                                 methodInsn.name,
                                                 descriptor.descriptorString(),
                                                 new Handle(
-                                                        Opcodes.H_INVOKESTATIC,
-                                                        implReceiver,
-                                                        implName,
-                                                        metafactoryDescriptor,
-                                                        isInterface
+                                                    Opcodes.H_INVOKESTATIC,
+                                                    metaImplInfo.implReceiver,
+                                                    metaImplInfo.implName,
+                                                    metafactoryDescriptor,
+                                                    isInterface
                                                 ),
-                                            args
+                                            argList.toArray()
                                         ));
                                     }
                                 }
@@ -246,6 +356,42 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                 };
             }
         };
+    }
+
+    private static @Nullable ExecutableElement locateMetafactoryElement(MetafactoryImplInfo metaImplInfo, Context.BinaryBridge binaryBridge, DescriptorTypeVisitor descriptors) {
+        ExecutableElement metafactoryElement = findMethodMatching(
+            metaImplInfo.implReceiver,
+            metaImplInfo.implName,
+            desc -> Type.getReturnType(desc).getDescriptor().equals(CallSite.class.descriptorString()) &&
+                Type.getArgumentCount(desc) >= 3 &&
+                Type.getArgumentTypes(desc)[0].getDescriptor().equals(MethodHandles.Lookup.class.descriptorString()) &&
+                Type.getArgumentTypes(desc)[1].getDescriptor().equals(String.class.descriptorString()) &&
+                Type.getArgumentTypes(desc)[2].getDescriptor().equals(MethodType.class.descriptorString()),
+            binaryBridge,
+            descriptors
+        );
+        return metafactoryElement;
+    }
+
+    private static MetafactoryImplInfo getMetaImplInfoOfElement(String ownerInternalName, ExecutableElement methodElement, Types types, AnnotationInfo annotationInfo, Elements elements) {
+        AnnotationMirror mirror = null;
+        for (var aMirror : methodElement.getAnnotationMirrors()) {
+            if (types.isSameType(aMirror.getAnnotationType(), annotationInfo.annotation().asType())) {
+                mirror = aMirror;
+            }
+        }
+
+        var implClazz = mirror.getElementValues().get(annotationInfo.clazz);
+        var implClazzType = implClazz == null ? annotationInfo.self.asType() : (TypeMirror) implClazz.getValue();
+        if (!(implClazzType instanceof DeclaredType declaredImplClazzType)) {
+            throw new IllegalArgumentException(String.format("clazz of @PolymorphicSignature must be a declared type, not '%s'", implClazzType));
+        }
+        var refersToSelf = types.isSameType(types.erasure(implClazzType), annotationInfo.self.asType());
+        return new MetafactoryImplInfo(
+            refersToSelf ? ownerInternalName : elements.getBinaryName((TypeElement) declaredImplClazzType.asElement()).toString().replace('.', '/'),
+        (String) Objects.requireNonNull(mirror).getElementValues().get(annotationInfo.value).getValue(),
+            refersToSelf ? null : declaredImplClazzType
+        );
     }
 
     private static ConstantDynamic getMethodConstant(String desc, String owner, String descriptor) {

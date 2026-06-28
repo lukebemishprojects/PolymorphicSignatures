@@ -18,7 +18,7 @@ java {
 dependencies {
     compileOnly(cLibs.bundles.compileonly)
     annotationProcessor(cLibs.bundles.annotationprocessor)
-    implementation("dev.lukebemish:javac-post-processor:0.1.9")
+    implementation("dev.lukebemish:javac-post-processor:0.1.10")
     implementation("dev.lukebemish:bytecodebuilder:0.2.1")
     implementation("org.ow2.asm:asm-analysis:9.10.1")
 
