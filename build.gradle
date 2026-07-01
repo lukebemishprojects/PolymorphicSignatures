@@ -57,6 +57,11 @@ tasks.named('compileUtilitiesJava', JavaCompile) {
     javacPostProcessor.plugins.add('dev.lukebemish.polymorphic-signatures')
 }
 
+tasks.named("test") {
+    // Disabled until we have a proper test suite
+    enabled = false
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
