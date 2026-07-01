@@ -20,6 +20,7 @@ plugins {
     id 'dev.lukebemish.jvmfinder-convention' version '+'
     id 'dev.lukebemish.conventions' version '+'
     id 'dev.lukebemish.managedversioning' version '+'
+    id 'dev.lukebemish.central-portal-publishing' version '+' apply false
 }
 
 gradle.lifecycle.beforeProject { p ->
@@ -37,10 +38,89 @@ managedVersioning {
     versionFile.set file('version.properties')
     versionPRs()
     versionSnapshots()
+
+    publishing {
+        mavenStaging()
+        mavenSnapshot()
+        mavenPullRequest()
+        mavenCentral()
+    }
+
+    gitHubActions {
+        release {
+            prettyName = 'Release'
+            workflowDispatch = true
+            gradleJob {
+                javaVersion.set '21'
+                name.set 'build'
+                buildCache()
+                setupGitUser()
+                readOnly = false
+                gradlew 'Tag Release', 'tagRelease'
+                gradlew 'Build', 'build'
+                push()
+                recordVersion 'Record Version', 'version'
+                dependencySubmission()
+            }
+            gradleJob {
+                javaVersion.set '21'
+                name.set 'publishCentral'
+                buildCache()
+                needs.add('build')
+                gradlew 'Publish Central', 'publish'
+                tag.set('${{needs.build.outputs.version}}')
+                sign()
+                mavenCentral()
+                mavenStaging('github')
+            }
+        }
+        snapshot {
+            prettyName.set 'Snapshot'
+            workflowDispatch.set(true)
+            onBranches.add 'main'
+            gradleJob {
+                javaVersion.set '21'
+                name.set 'build'
+                buildCache()
+                cacheReadOnly = false
+                gradlew 'Build', 'build'
+                gradlew 'Publish', 'publish'
+                mavenSnapshot('github')
+            }
+        }
+        build_pr {
+            prettyName.set 'Build PR'
+            pullRequest.set(true)
+            gradleJob {
+                javaVersion.set '21'
+                name.set 'build'
+                gradlew 'Build', 'build'
+                gradlew 'Publish', 'publish'
+                pullRequestArtifact()
+            }
+        }
+        publish_pr {
+            prettyName.set 'Publish PR'
+            publishPullRequestAction(
+                'github',
+                "dev/lukebemish/polymorphic-signatures",
+                'Build PR'
+            )
+        }
+    }
 }
 
 gradle.lifecycle.beforeProject {
     group = 'dev.lukebemish' + (project.path == ':' ? '' : '.polymorphic-signatures' + project.path.split(':')[0..-2].join('.'))
+
+    pluginManager.apply('maven-publish')
+    pluginManager.apply('signing')
+
+    publishing {
+        publications.configureEach {
+            managedVersioning.sign(signing, it)
+        }
+    }
 }
 
 dependencyResolutionManagement {

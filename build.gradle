@@ -56,3 +56,16 @@ tasks.register('compileTestJavaDebug', JavaCompile) {
 tasks.named('compileUtilitiesJava', JavaCompile) {
     javacPostProcessor.plugins.add('dev.lukebemish.polymorphic-signatures')
 }
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            managedVersioning.pom(it, github_repo, license)
+            pom {
+                name = 'Polymorphic Signatures'
+                description = 'A javac-post-processor plugin for methods with polymorphic signatures similar to MethodHandle#invoke, backed by INDY metafactories.'
+            }
+        }
+    }
+}
