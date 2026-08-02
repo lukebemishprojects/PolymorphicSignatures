@@ -112,9 +112,9 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
             }
 
             @Override
-            public MethodVisitor visitMethod(int access, String ownerName, String ownerDescriptor, String signature, String[] exceptions) {
-                var node = new MethodNode(access, ownerName, ownerDescriptor, signature, exceptions);
-                Supplier<MethodVisitor> superVisitor = () -> super.visitMethod(node.access, ownerName, ownerDescriptor, signature, exceptions);
+            public MethodVisitor visitMethod(int access, String methodOwnerName, String ownerDescriptor, String signature, String[] exceptions) {
+                var node = new MethodNode(access, methodOwnerName, ownerDescriptor, signature, exceptions);
+                Supplier<MethodVisitor> superVisitor = () -> super.visitMethod(node.access, methodOwnerName, ownerDescriptor, signature, exceptions);
                 var cwDelegate = this.getDelegate();
                 return new MethodVisitor(Opcodes.ASM9, node) {
                     @Override
@@ -138,7 +138,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
 
                                     // Check for `@Bootstrap.Reeiver` on MethodHandles.Lookup and generate a bounce if one is present
                                     ExecutableElement methodElement = findMethodMatching(
-                                        binaryName.replace('.', '/'), ownerName, ownerDescriptor::equals,
+                                        binaryName.replace('.', '/'), methodOwnerName, ownerDescriptor::equals,
                                         binaryBridge,
                                         descriptors
                                     );
@@ -172,7 +172,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             // ...so we generate a bounce method
                                             var mv = cwDelegate.visitMethod(
                                                 (access | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC) & ~(Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT | Opcodes.ACC_FINAL),
-                                                "$" + ownerName + "$" + metaImplInfo.implName,
+                                                "$" + methodOwnerName + "$" + metaImplInfo.implName,
                                                 unBootstrapDescriptor,
                                                 null,
                                                 null
@@ -230,7 +230,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             descriptor = descriptor.insertParameterTypes(0, ClassDesc.ofInternalName(methodInsn.owner));
                                         }
 
-                                        descriptor = findActualDescriptor(ownerName, node, methodInsn, descriptor, methodElement.isVarArgs());
+                                        descriptor = findActualDescriptor(binaryName, node, methodInsn, descriptor, methodElement.isVarArgs());
                                         if (descriptor == null) {
                                             continue;
                                         }
@@ -251,7 +251,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                 used = "@Receiver";
                                                 var desc = descriptors.descriptor(param.asType());
                                                 if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString()) && !desc.equals(MethodHandles.Lookup.class.descriptorString())) {
-                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class or Method argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
+                                                    throw new IllegalArgumentException(String.format("Found @Receiver on non-Class, Method, or MethodHandles.Lookup argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
                                                 } else {
                                                     receiverArgIdxs.add(i - 3);
                                                 }
@@ -262,8 +262,8 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                                 }
                                                 used = "@Caller";
                                                 var desc = descriptors.descriptor(param.asType());
-                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString())) {
-                                                    throw new IllegalArgumentException(String.format("Found @Caller on non-Class or Method argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
+                                                if (!desc.equals(Class.class.descriptorString()) && !desc.equals(Method.class.descriptorString()) && !desc.equals(String.class.descriptorString()) && !desc.equals(MethodType.class.descriptorString())) {
+                                                    throw new IllegalArgumentException(String.format("Found @Caller on non-Class, Method, String, or MethodType argument of metafactory %s in %s", metaImplInfo.implName, metaImplInfo.implReceiver));
                                                 } else {
                                                     callerArgIdxs.add(i - 3);
                                                 }
@@ -314,9 +314,21 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
                                             var desc = metafactoryParameterTypes[i + 3].getDescriptor();
                                             if (desc.equals(Class.class.descriptorString())) {
                                                 args[i] = Type.getObjectType(binaryName.replace('.', '/'));
-                                            } else {
+                                            } else if (desc.equals(Method.class.descriptorString())) {
                                                 // Method
-                                                args[i] = getMethodConstant(ownerDescriptor, binaryName, ownerName);
+                                                if (methodOwnerName.equals("<clinit>") || methodOwnerName.equals("<init>")) {
+                                                    // TODO: log/warn?
+                                                    throw new IllegalArgumentException("Cannot pass the Method expected by the receiver from static or instance initialization");
+                                                }
+                                                args[i] = getMethodConstant(ownerDescriptor, binaryName, methodOwnerName);
+                                            } else if (desc.equals(String.class.descriptorString())) {
+                                                // String
+                                                args[i] = methodOwnerName;
+                                            } else {
+                                                // MethodType
+                                                args[i] = BackendASM.ConstantsASM.toAsm(
+                                                    MethodTypeDesc.ofDescriptor(ownerDescriptor)
+                                                );
                                             }
                                         }
 
@@ -359,7 +371,7 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
     }
 
     private static @Nullable ExecutableElement locateMetafactoryElement(MetafactoryImplInfo metaImplInfo, Context.BinaryBridge binaryBridge, DescriptorTypeVisitor descriptors) {
-        ExecutableElement metafactoryElement = findMethodMatching(
+        return findMethodMatching(
             metaImplInfo.implReceiver,
             metaImplInfo.implName,
             desc -> Type.getReturnType(desc).getDescriptor().equals(CallSite.class.descriptorString()) &&
@@ -370,7 +382,6 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
             binaryBridge,
             descriptors
         );
-        return metafactoryElement;
     }
 
     private static MetafactoryImplInfo getMetaImplInfoOfElement(String ownerInternalName, ExecutableElement methodElement, Types types, AnnotationInfo annotationInfo, Elements elements) {
@@ -394,11 +405,11 @@ public final class PolymorphicSignaturesPlugin implements PostProcessor {
         );
     }
 
-    private static ConstantDynamic getMethodConstant(String desc, String owner, String descriptor) {
+    private static ConstantDynamic getMethodConstant(String desc, String owner, String methodName) {
         var callerDesc = MethodTypeDesc.ofDescriptor(desc);
         var declaredMethodArgs = new ConstantDesc[callerDesc.parameterCount() + 2];
         declaredMethodArgs[0] = ClassDesc.of(owner);
-        declaredMethodArgs[1] = descriptor;
+        declaredMethodArgs[1] = methodName;
         for (int j = 0; j < callerDesc.parameterCount(); j++) {
             declaredMethodArgs[j + 2] = callerDesc.parameterType(j);
         }

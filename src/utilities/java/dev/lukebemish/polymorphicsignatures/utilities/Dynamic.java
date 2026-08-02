@@ -35,7 +35,23 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-public class Dynamic {
+/// A metafactory for use with {@link dev.lukebemish.polymorphicsignatures.PolymorphicSignature} that allows for dispatch
+/// based on the runtime types of all arguments, not just the receiving parameter. To use, annotate a static method with
+/// this metafactory, and then provide implementations for the relevant combinations of receiving type:
+/// {@snippet :
+/// @PolymorphicSignature(value = "dynamic", clazz = Dynamic.class)
+/// public static native void target(Object left, Object right);
+///
+/// private static void target(String left, String right) {}
+/// private static void target(String left, Object right) {}
+/// private static void target(Object left, String right) {}
+/// }
+/// Which of the available implementations is called depends on the type of the target; in particular, the metafactory
+/// generates a series of nested table lookups, similar to writing a switch statement, to choose between the
+/// implementations. Implementations incompatible with the compile-inferred types are excluded. If no implementation can
+/// be picked, a {@link NoSuchMethodException} is thrown.
+public final class Dynamic {
+    @PublicMetafactory
     public static CallSite dynamic(MethodHandles.Lookup lookup, String name, MethodType methodType, @Bootstrap.Receiver Method receiver, @Bootstrap.Receiver MethodHandles.Lookup receiverLookup) throws IllegalAccessException, NoSuchMethodException {
         if (!receiver.accessFlags().contains(AccessFlag.STATIC)) {
             return new ConstantCallSite(MethodHandles.dropArguments(
@@ -363,4 +379,6 @@ public class Dynamic {
         }
         return out;
     }
+
+    private Dynamic() {}
 }

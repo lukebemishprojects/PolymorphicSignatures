@@ -9,6 +9,7 @@ import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 
+/// Utilities for working with collections
 public final class CollectionUtils {
     /// {@return an array of the compile-inferred type of the provided size}
     /// This method is signature-polymorphic by its return type; the return type is determined at compile time and used
@@ -37,6 +38,7 @@ public final class CollectionUtils {
     // included in consumer bytecode!
 
     @ApiStatus.Internal
+    @ImplementationMetafactory
     public static CallSite $array(MethodHandles.Lookup lookup, String name, MethodType type) {
         if (type.returnType().isArray()) {
             return new ConstantCallSite(MethodHandles.arrayConstructor(type.returnType()));

@@ -10,10 +10,11 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.function.Consumer;
 
+/// Signature-polymorphic utilities for working with properties of the receiver or parameter types
 public final class TypeUtils {
     /// {@return the default value of the output type}
     /// This is the value that a newly-created array of that type would be populated with; it is {@code null} for
-    /// reference types and {@code 0} for primitives, or nothing at all for void.
+    /// reference types and {@code 0} (or {@code false}) for primitives, or nothing at all for void.
     /// @param <T> the type to return; will be inferred at compile time
     @PolymorphicSignature("$defaultValue")
     public native static <T> T defaultValue();
@@ -64,11 +65,13 @@ public final class TypeUtils {
     // included in consumer bytecode!
 
     @ApiStatus.Internal
+    @ImplementationMetafactory
     public static CallSite $defaultValue(MethodHandles.Lookup lookup, String name, MethodType type) {
         return new ConstantCallSite(MethodHandles.empty(type));
     }
 
     @ApiStatus.Internal
+    @ImplementationMetafactory
     public static CallSite $typeBound(MethodHandles.Lookup lookup, String name, MethodType type) {
         var isMin = name.equals("typeMin");
         MethodHandle handle;
@@ -102,6 +105,7 @@ public final class TypeUtils {
     }
 
     @ApiStatus.Internal
+    @ImplementationMetafactory
     public static CallSite $typeNaN(MethodHandles.Lookup lookup, String name, MethodType type) {
         MethodHandle handle;
         if (type.returnType() == void.class) {
@@ -122,6 +126,7 @@ public final class TypeUtils {
     }
 
     @ApiStatus.Internal
+    @ImplementationMetafactory
     public static CallSite $reportType(MethodHandles.Lookup lookup, String name, MethodType type) throws NoSuchMethodException, IllegalAccessException {
         var valueType = name.equals("reportParameterType") ? type.parameterType(0) : type.returnType();
         var consume = MethodHandles.permuteArguments(
